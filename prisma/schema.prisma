@@ -1,0 +1,346 @@
+// ============================================================
+// Plataforma de Afiliados Dynamo — Prisma Schema
+// Banco de dados: PostgreSQL (Supabase)
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum UserRole {
+  ADMIN
+  AFFILIATE
+}
+
+enum AffiliateStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  INACTIVE
+}
+
+enum CouponStatus {
+  ACTIVE
+  INACTIVE
+  EXPIRED
+}
+
+enum SaleStatus {
+  PENDING
+  APPROVED
+  CANCELLED
+  REFUNDED
+}
+
+enum CommissionStatus {
+  PENDING
+  APPROVED
+  PAID
+  CANCELLED
+}
+
+enum PayoutStatus {
+  REQUESTED
+  PROCESSING
+  PAID
+  REJECTED
+}
+
+enum PayoutMethod {
+  PIX
+  BANK_TRANSFER
+}
+
+enum NotificationChannel {
+  EMAIL
+  WHATSAPP
+  IN_APP
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  READ
+}
+
+// ============================================================
+// AUTENTICAÇÃO (NextAuth / Auth.js)
+// ============================================================
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  passwordHash  String?
+  image         String?
+  role          UserRole  @default(AFFILIATE)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts  Account[]
+  sessions  Session[]
+  affiliate Affiliate?
+
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+model PasswordResetToken {
+  id      String   @id @default(cuid())
+  email   String
+  token   String   @unique
+  expires DateTime
+
+  @@unique([email, token])
+  @@map("password_reset_tokens")
+}
+
+// ============================================================
+// AFILIADOS
+// ============================================================
+
+model Affiliate {
+  id             String          @id @default(cuid())
+  userId         String          @unique
+  status         AffiliateStatus @default(PENDING)
+  phone          String?
+  whatsapp       String?
+  instagram      String?
+  tiktok         String?
+  document       String? // CPF/CNPJ
+  pixKey         String?
+  bankInfo       Json?
+  // Comissão padrão de 10%; progressão para 15% após 10 vendas no mês
+  commissionRate Decimal         @default(10.00) @db.Decimal(5, 2)
+  notes          String?         @db.Text
+  approvedAt     DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  coupons       Coupon[]
+  sales         Sale[]
+  commissions   Commission[]
+  payouts       Payout[]
+  notifications Notification[]
+
+  @@index([status])
+  @@map("affiliates")
+}
+
+// ============================================================
+// CUPONS (integração Shopify)
+// ============================================================
+
+model Coupon {
+  id                  String       @id @default(cuid())
+  affiliateId         String
+  code                String       @unique
+  status              CouponStatus @default(ACTIVE)
+  discountType        String       @default("percentage") // percentage | fixed_amount
+  discountValue       Decimal      @db.Decimal(10, 2)
+  shopifyPriceRuleId  String?      @unique
+  shopifyDiscountId   String?      @unique
+  usageCount          Int          @default(0)
+  usageLimit          Int?
+  startsAt            DateTime?
+  expiresAt           DateTime?
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  affiliate Affiliate @relation(fields: [affiliateId], references: [id], onDelete: Cascade)
+  sales     Sale[]
+
+  @@index([affiliateId])
+  @@index([status])
+  @@map("coupons")
+}
+
+// ============================================================
+// VENDAS (pedidos Shopify atribuídos a afiliados)
+// ============================================================
+
+model Sale {
+  id                 String     @id @default(cuid())
+  affiliateId        String
+  couponId           String?
+  status             SaleStatus @default(PENDING)
+  shopifyOrderId     String     @unique
+  shopifyOrderNumber String?
+  customerEmail      String?
+  totalAmount        Decimal    @db.Decimal(12, 2)
+  discountAmount     Decimal    @default(0) @db.Decimal(12, 2)
+  currency           String     @default("BRL")
+  orderDate          DateTime
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  affiliate  Affiliate   @relation(fields: [affiliateId], references: [id])
+  coupon     Coupon?     @relation(fields: [couponId], references: [id])
+  commission Commission?
+
+  @@index([affiliateId])
+  @@index([status])
+  @@index([orderDate])
+  @@map("sales")
+}
+
+// ============================================================
+// COMISSÕES
+// ============================================================
+
+model Commission {
+  id          String           @id @default(cuid())
+  affiliateId String
+  saleId      String           @unique
+  status      CommissionStatus @default(PENDING)
+  // Percentual aplicado no momento da venda (ex.: 10.00 ou 15.00)
+  rate        Decimal          @db.Decimal(5, 2)
+  amount      Decimal          @db.Decimal(12, 2)
+  currency    String           @default("BRL")
+  payoutId    String?
+  approvedAt  DateTime?
+  paidAt      DateTime?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  affiliate Affiliate @relation(fields: [affiliateId], references: [id])
+  sale      Sale      @relation(fields: [saleId], references: [id])
+  payout    Payout?   @relation(fields: [payoutId], references: [id])
+
+  @@index([affiliateId])
+  @@index([status])
+  @@map("commissions")
+}
+
+// ============================================================
+// PAGAMENTOS (saques de comissão)
+// ============================================================
+
+model Payout {
+  id          String       @id @default(cuid())
+  affiliateId String
+  status      PayoutStatus @default(REQUESTED)
+  method      PayoutMethod @default(PIX)
+  amount      Decimal      @db.Decimal(12, 2)
+  currency    String       @default("BRL")
+  reference   String?
+  notes       String?      @db.Text
+  requestedAt DateTime     @default(now())
+  processedAt DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  affiliate   Affiliate    @relation(fields: [affiliateId], references: [id])
+  commissions Commission[]
+
+  @@index([affiliateId])
+  @@index([status])
+  @@map("payouts")
+}
+
+// ============================================================
+// NOTIFICAÇÕES (e-mail / WhatsApp / in-app)
+// ============================================================
+
+model Notification {
+  id          String              @id @default(cuid())
+  affiliateId String?
+  channel     NotificationChannel
+  status      NotificationStatus  @default(PENDING)
+  title       String
+  body        String              @db.Text
+  metadata    Json?
+  sentAt      DateTime?
+  readAt      DateTime?
+  createdAt   DateTime            @default(now())
+
+  affiliate Affiliate? @relation(fields: [affiliateId], references: [id], onDelete: SetNull)
+
+  @@index([affiliateId])
+  @@index([status])
+  @@map("notifications")
+}
+
+// ============================================================
+// CONFIGURAÇÕES DA PLATAFORMA
+// ============================================================
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+// ============================================================
+// LOG DE WEBHOOKS SHOPIFY
+// ============================================================
+
+model WebhookEvent {
+  id          String   @id @default(cuid())
+  source      String   @default("shopify")
+  topic       String
+  payload     Json
+  processed   Boolean  @default(false)
+  processedAt DateTime?
+  error       String?  @db.Text
+  createdAt   DateTime @default(now())
+
+  @@index([topic])
+  @@index([processed])
+  @@map("webhook_events")
+}
